@@ -2,7 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use triple_buffer::TripleBuffer;
 
 pub fn benchmark(c: &mut Criterion) {
-    let (mut input, mut output) = TripleBuffer::<u8>::default().split();
+    let (mut input, output) = TripleBuffer::<u8>::default().split();
 
     {
         let mut uncontended = c.benchmark_group("uncontended");

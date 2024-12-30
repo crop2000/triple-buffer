@@ -1,4 +1,4 @@
-# Triple buffering in Rust
+# Triple buffering in Rust (fork that makes the output immutable but breaks it's lockfree nature, input is still lock and wait-free)
 
 [![MPLv2 licensed](https://img.shields.io/badge/license-MPLv2-blue.svg)](./LICENSE)
 [![On crates.io](https://img.shields.io/crates/v/triple_buffer.svg)](https://crates.io/crates/triple_buffer)
@@ -6,7 +6,6 @@
 [![Continuous Integration](https://img.shields.io/github/actions/workflow/status/HadrienG2/triple-buffer/ci.yml?branch=master)](https://github.com/HadrienG2/triple-buffer/actions?query=workflow%3A%22Continuous+Integration%22)
 ![Requires rustc
 1.74.0+](https://img.shields.io/badge/rustc-1.74.0+-lightgray.svg)
-
 
 ## What is this?
 

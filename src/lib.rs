@@ -61,7 +61,7 @@
 //! buf_output.update();
 //!
 //! // Acquire reference to the output buffer
-//! let output = buf_output.peek_output_buffer();
+//! let output = buf_output.output_buffer();
 //! assert_eq!(*output, "Hello, ");
 //!
 //! // Or acquire it mutably if necessary
@@ -71,7 +71,6 @@
 //! output_mut.push_str("world!");
 //! ```
 
-#![cfg_attr(not(test), no_std)]
 #![deny(missing_debug_implementations, missing_docs)]
 
 extern crate alloc;
@@ -83,6 +82,7 @@ use core::{
     cell::UnsafeCell,
     sync::atomic::{AtomicU8, Ordering},
 };
+use std::sync::RwLock;
 
 /// A triple buffer, useful for nonblocking and thread-safe data sharing
 ///
@@ -128,7 +128,7 @@ impl<T: Send> TripleBuffer<T> {
             },
             output: Output {
                 shared: shared_state,
-                output_idx: 2,
+                output_idx: Arc::new(RwLock::new(2)),
             },
         }
     }
@@ -162,7 +162,7 @@ impl<T: Clone + Send> Clone for TripleBuffer<T> {
         // Clone the shared state. This is safe because at this layer of the
         // interface, one needs an Input/Output &mut to mutate the shared state.
         let shared_state = Arc::new(unsafe { (*self.input.shared).clone() });
-
+        let new_output_idx = Arc::new(RwLock::new(*self.output.output_idx.read().unwrap()));
         // ...then the input and output structs
         TripleBuffer {
             input: Input {
@@ -171,7 +171,7 @@ impl<T: Clone + Send> Clone for TripleBuffer<T> {
             },
             output: Output {
                 shared: shared_state,
-                output_idx: self.output.output_idx,
+                output_idx: new_output_idx,
             },
         }
     }
@@ -187,7 +187,7 @@ impl<T: PartialEq + Send> PartialEq for TripleBuffer<T> {
         // Compare the rest of the triple buffer states
         shared_states_equal
             && (self.input.input_idx == other.input.input_idx)
-            && (self.output.output_idx == other.output.output_idx)
+            && (*self.output.output_idx.read().unwrap() == *other.output.output_idx.read().unwrap())
     }
 }
 
@@ -309,19 +309,19 @@ impl<T: Send> Input<T> {
 /// collision between the producer and consumer will result in cache contention,
 /// but deadlocks and scheduling-induced slowdowns cannot happen.
 ///
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Output<T: Send> {
     /// Reference-counted shared state
     shared: Arc<SharedState<T>>,
 
     /// Index of the output buffer (which is private to the consumer)
-    output_idx: BufferIndex,
+    output_idx: Arc<RwLock<BufferIndex>>,
 }
 //
 // Public interface
 impl<T: Send> Output<T> {
     /// Access the latest value from the triple buffer
-    pub fn read(&mut self) -> &T {
+    pub fn read(&self) -> &T {
         // Fetch updates from the producer
         self.update();
 
@@ -342,19 +342,6 @@ impl<T: Send> Output<T> {
         back_info & BACK_DIRTY_BIT != 0
     }
 
-    /// Access the output buffer directly, in non-mutable way
-    ///
-    /// This is simply a non-mutable version of `output_buffer()`.
-    /// For details, see the `output_buffer()` method.
-    ///
-    /// This method does not update the output buffer automatically. You need to call
-    /// `update()` in order to fetch buffer updates from the producer.
-    pub fn peek_output_buffer(&self) -> &T {
-        // Access the output buffer directly
-        let output_ptr = self.shared.buffers[self.output_idx as usize].get();
-        unsafe { &*output_ptr }
-    }
-
     /// Access the output buffer directly
     ///
     /// This advanced interface allows you to modify the contents of the output
@@ -373,11 +360,11 @@ impl<T: Send> Output<T> {
     /// method does not update the output buffer automatically. You need to call
     /// `update()` in order to fetch buffer updates from the producer.
     ///
-    pub fn output_buffer(&mut self) -> &mut T {
+    pub fn output_buffer(&self) -> &T {
         // This is safe because the synchronization protocol ensures that we
         // have exclusive access to this buffer.
-        let output_ptr = self.shared.buffers[self.output_idx as usize].get();
-        unsafe { &mut *output_ptr }
+        let output_ptr = self.shared.buffers[*self.output_idx.read().unwrap() as usize].get();
+        unsafe { &*output_ptr }
     }
 
     /// Update the output buffer
@@ -389,13 +376,13 @@ impl<T: Send> Output<T> {
     /// Bear in mind that when this happens, you will lose any change that you
     /// performed to the output buffer via the `output_buffer()` interface.
     ///
-    pub fn update(&mut self) -> bool {
-        // Access the shared state
-        let shared_state = &(*self.shared);
-
+    pub fn update(&self) -> bool {
         // Check if an update is present in the back-buffer
         let updated = self.updated();
         if updated {
+            // Access the shared state
+            let shared_state = &(*self.shared);
+
             // If so, exchange our output buffer with the back-buffer, thusly
             // acquiring exclusive access to the old back buffer while giving
             // the producer a new back-buffer to write to.
@@ -417,10 +404,10 @@ impl<T: Send> Output<T> {
             //
             let former_back_info = shared_state
                 .back_info
-                .swap(self.output_idx, Ordering::AcqRel);
+                .swap(*self.output_idx.read().unwrap(), Ordering::AcqRel);
 
             // Make the old back-buffer our new output buffer
-            self.output_idx = former_back_info & BACK_INDEX_MASK;
+            *self.output_idx.write().unwrap() = former_back_info & BACK_INDEX_MASK;
         }
 
         // Tell whether an update was carried out
@@ -563,7 +550,10 @@ mod tests {
         // but the buffers should nevertheless be considered different.
         let buf2 = TripleBuffer::new(&"taste");
         assert_eq!(buf.input.input_idx, buf2.input.input_idx);
-        assert_eq!(buf.output.output_idx, buf2.output.output_idx);
+        assert_eq!(
+            *buf.output.output_idx.read().unwrap(),
+            *buf2.output.output_idx.read().unwrap()
+        );
         assert!(buf != buf2);
 
         // Check that changing either the input or output buffer index will
@@ -573,10 +563,10 @@ mod tests {
         let mut buf3 = TripleBuffer::new(&"test");
         assert_eq!(buf, buf3);
         let old_input_idx = buf3.input.input_idx;
-        buf3.input.input_idx = buf3.output.output_idx;
+        buf3.input.input_idx = *buf3.output.output_idx.read().unwrap();
         assert!(buf != buf3);
         buf3.input.input_idx = old_input_idx;
-        buf3.output.output_idx = old_input_idx;
+        *buf3.output.output_idx.write().unwrap() = old_input_idx;
         assert!(buf != buf3);
     }
 
@@ -618,7 +608,7 @@ mod tests {
             .back_info
             .store(BACK_DIRTY_BIT & 0b01, Ordering::Relaxed);
         buf.input.input_idx = 0b10;
-        buf.output.output_idx = 0b00;
+        *buf.output.output_idx.write().unwrap() = 0b00;
 
         // Now clone it
         let buf_clone = buf.clone();
@@ -645,7 +635,7 @@ mod tests {
             BACK_DIRTY_BIT & 0b01
         );
         assert_eq!(buf.input.input_idx, 0b10);
-        assert_eq!(buf.output.output_idx, 0b00);
+        assert_eq!(*buf.output.output_idx.read().unwrap(), 0b00);
     }
 
     /// Check that the low-level publish/update primitives work
@@ -658,7 +648,7 @@ mod tests {
         let old_shared = &old_buf.input.shared;
         let old_back_info = old_shared.back_info.load(Ordering::Relaxed);
         let old_back_idx = old_back_info & BACK_INDEX_MASK;
-        let old_output_idx = old_buf.output.output_idx;
+        let old_output_idx = *old_buf.output.output_idx.read().unwrap();
 
         // Check that updating from a clean state works
         assert!(!buf.output.update());
@@ -691,7 +681,7 @@ mod tests {
 
         // Check that updating from a dirty state works
         assert!(buf.output.update());
-        expected_buf.output.output_idx = old_back_idx;
+        *expected_buf.output.output_idx.write().unwrap() = old_back_idx;
         expected_buf
             .output
             .shared
@@ -747,7 +737,7 @@ mod tests {
             assert_eq!(result, 4.2);
 
             // Result should be equivalent to carrying out an update
-            let mut expected_buf = old_buf.clone();
+            let expected_buf = old_buf.clone();
             assert!(expected_buf.output.update());
             assert_eq!(buf, expected_buf);
             check_buf_state(&mut buf, false);
@@ -772,7 +762,7 @@ mod tests {
 
     /// Check that contended concurrent reads and writes work
     #[test]
-    #[ignore]
+    // #[ignore]
     fn contended_concurrent_read_write() {
         // We will stress the infrastructure by performing this many writes
         // as a reader continuously reads the latest value
@@ -783,7 +773,7 @@ mod tests {
 
         // This is the buffer that our reader and writer will share
         let buf = TripleBuffer::new(&RaceCell::new(0));
-        let (mut buf_input, mut buf_output) = buf.split();
+        let (mut buf_input, buf_output) = buf.split();
 
         // Concurrently run a writer which increments a shared value in a loop,
         // and a reader which makes sure that no unexpected value slips in.
@@ -821,7 +811,7 @@ mod tests {
     /// - Increase the writer sleep period
     ///
     #[test]
-    #[ignore]
+    // #[ignore]
     fn uncontended_concurrent_read_write() {
         // We will stress the infrastructure by performing this many writes
         // as a reader continuously reads the latest value
@@ -832,7 +822,7 @@ mod tests {
 
         // This is the buffer that our reader and writer will share
         let buf = TripleBuffer::new(&RaceCell::new(0));
-        let (mut buf_input, mut buf_output) = buf.split();
+        let (mut buf_input, buf_output) = buf.split();
 
         // Concurrently run a writer which slowly increments a shared value,
         // and a reader which checks that it can receive every update
@@ -867,7 +857,7 @@ mod tests {
     /// producer. This creates new correctness requirements for the
     /// synchronization protocol, which must be checked as well.
     #[test]
-    #[ignore]
+    // #[ignore]
     fn concurrent_bidirectional_exchange() {
         // We will stress the infrastructure by performing this many writes
         // as a reader continuously reads the latest value
@@ -878,7 +868,7 @@ mod tests {
 
         // This is the buffer that our reader and writer will share
         let buf = TripleBuffer::new(&RaceCell::new(0));
-        let (mut buf_input, mut buf_output) = buf.split();
+        let (mut buf_input, buf_output) = buf.split();
 
         // Concurrently run a writer which increments a shared value in a loop,
         // and a reader which makes sure that no unexpected value slips in.
@@ -899,7 +889,7 @@ mod tests {
             move || {
                 let mut last_value = 0usize;
                 while last_value < TEST_WRITE_COUNT {
-                    match buf_output.peek_output_buffer().get() {
+                    match buf_output.output_buffer().get() {
                         Racey::Consistent(new_value) => {
                             assert!((new_value >= last_value) && (new_value <= TEST_WRITE_COUNT));
                             last_value = new_value;
@@ -946,13 +936,13 @@ mod tests {
 
         // Input-/output-/back-buffer indexes must be in range
         assert!(index_in_range(buf.input.input_idx));
-        assert!(index_in_range(buf.output.output_idx));
+        assert!(index_in_range(*buf.output.output_idx.read().unwrap()));
         assert!(index_in_range(back_idx));
 
         // Input-/output-/back-buffer indexes must be distinct
-        assert!(buf.input.input_idx != buf.output.output_idx);
+        assert!(buf.input.input_idx != *buf.output.output_idx.read().unwrap());
         assert!(buf.input.input_idx != back_idx);
-        assert!(buf.output.output_idx != back_idx);
+        assert!(*buf.output.output_idx.read().unwrap() != back_idx);
 
         // Back-buffer must have the expected dirty bit
         assert_eq!(back_buffer_dirty, expected_dirty_bit);
@@ -971,7 +961,7 @@ mod tests {
         // Check that the output_buffer query works in the initial state
         assert_eq!(
             as_ptr(&buf.output.output_buffer()),
-            buf.output.shared.buffers[buf.output.output_idx as usize].get()
+            buf.output.shared.buffers[*buf.output.output_idx.read().unwrap() as usize].get()
         );
         assert_eq!(*buf, initial_buf);
 
