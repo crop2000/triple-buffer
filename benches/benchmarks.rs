@@ -39,9 +39,10 @@ pub fn benchmark(c: &mut Criterion) {
     }
 
     {
+        let (mut input, output) = TripleBuffer::<u8>::default().split();
         let mut read_contended = c.benchmark_group("read contention");
         testbench::run_under_contention(
-            || black_box(*output.read()),
+            move || black_box(*output.read()),
             || {
                 read_contended.bench_function("write input", |b| {
                     b.iter(|| {
@@ -59,6 +60,7 @@ pub fn benchmark(c: &mut Criterion) {
     }
 
     {
+        let (mut input, output) = TripleBuffer::<u8>::default().split();
         let mut write_contended = c.benchmark_group("write contention");
         testbench::run_under_contention(
             || input.write(black_box(0)),

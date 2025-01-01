@@ -82,7 +82,7 @@ use core::{
     cell::UnsafeCell,
     sync::atomic::{AtomicU8, Ordering},
 };
-use std::sync::RwLock;
+use std::cell::Cell;
 
 /// A triple buffer, useful for nonblocking and thread-safe data sharing
 ///
@@ -128,7 +128,7 @@ impl<T: Send> TripleBuffer<T> {
             },
             output: Output {
                 shared: shared_state,
-                output_idx: Arc::new(RwLock::new(2)),
+                output_idx: Cell::new(2),
             },
         }
     }
@@ -162,7 +162,7 @@ impl<T: Clone + Send> Clone for TripleBuffer<T> {
         // Clone the shared state. This is safe because at this layer of the
         // interface, one needs an Input/Output &mut to mutate the shared state.
         let shared_state = Arc::new(unsafe { (*self.input.shared).clone() });
-        let new_output_idx = Arc::new(RwLock::new(*self.output.output_idx.read().unwrap()));
+        let new_output_idx = Cell::new(self.output.output_idx.get());
         // ...then the input and output structs
         TripleBuffer {
             input: Input {
@@ -187,7 +187,11 @@ impl<T: PartialEq + Send> PartialEq for TripleBuffer<T> {
         // Compare the rest of the triple buffer states
         shared_states_equal
             && (self.input.input_idx == other.input.input_idx)
-            && (*self.output.output_idx.read().unwrap() == *other.output.output_idx.read().unwrap())
+            && (self
+                .output
+                .output_idx
+                .get()
+                .eq(&other.output.output_idx.get()))
     }
 }
 
@@ -315,7 +319,7 @@ pub struct Output<T: Send> {
     shared: Arc<SharedState<T>>,
 
     /// Index of the output buffer (which is private to the consumer)
-    output_idx: Arc<RwLock<BufferIndex>>,
+    output_idx: Cell<BufferIndex>,
 }
 //
 // Public interface
@@ -363,7 +367,7 @@ impl<T: Send> Output<T> {
     pub fn output_buffer(&self) -> &T {
         // This is safe because the synchronization protocol ensures that we
         // have exclusive access to this buffer.
-        let output_ptr = self.shared.buffers[*self.output_idx.read().unwrap() as usize].get();
+        let output_ptr = self.shared.buffers[self.output_idx.get() as usize].get();
         unsafe { &*output_ptr }
     }
 
@@ -404,10 +408,10 @@ impl<T: Send> Output<T> {
             //
             let former_back_info = shared_state
                 .back_info
-                .swap(*self.output_idx.read().unwrap(), Ordering::AcqRel);
+                .swap(self.output_idx.get(), Ordering::AcqRel);
 
             // Make the old back-buffer our new output buffer
-            *self.output_idx.write().unwrap() = former_back_info & BACK_INDEX_MASK;
+            self.output_idx.set(former_back_info & BACK_INDEX_MASK);
         }
 
         // Tell whether an update was carried out
@@ -550,10 +554,7 @@ mod tests {
         // but the buffers should nevertheless be considered different.
         let buf2 = TripleBuffer::new(&"taste");
         assert_eq!(buf.input.input_idx, buf2.input.input_idx);
-        assert_eq!(
-            *buf.output.output_idx.read().unwrap(),
-            *buf2.output.output_idx.read().unwrap()
-        );
+        assert_eq!(buf.output.output_idx.get(), buf2.output.output_idx.get());
         assert!(buf != buf2);
 
         // Check that changing either the input or output buffer index will
@@ -563,10 +564,10 @@ mod tests {
         let mut buf3 = TripleBuffer::new(&"test");
         assert_eq!(buf, buf3);
         let old_input_idx = buf3.input.input_idx;
-        buf3.input.input_idx = *buf3.output.output_idx.read().unwrap();
+        buf3.input.input_idx = buf3.output.output_idx.get();
         assert!(buf != buf3);
         buf3.input.input_idx = old_input_idx;
-        *buf3.output.output_idx.write().unwrap() = old_input_idx;
+        buf3.output.output_idx.set(old_input_idx);
         assert!(buf != buf3);
     }
 
@@ -608,7 +609,7 @@ mod tests {
             .back_info
             .store(BACK_DIRTY_BIT & 0b01, Ordering::Relaxed);
         buf.input.input_idx = 0b10;
-        *buf.output.output_idx.write().unwrap() = 0b00;
+        buf.output.output_idx.set(0b00);
 
         // Now clone it
         let buf_clone = buf.clone();
@@ -635,7 +636,7 @@ mod tests {
             BACK_DIRTY_BIT & 0b01
         );
         assert_eq!(buf.input.input_idx, 0b10);
-        assert_eq!(*buf.output.output_idx.read().unwrap(), 0b00);
+        assert_eq!(buf.output.output_idx.get(), 0b00);
     }
 
     /// Check that the low-level publish/update primitives work
@@ -648,7 +649,7 @@ mod tests {
         let old_shared = &old_buf.input.shared;
         let old_back_info = old_shared.back_info.load(Ordering::Relaxed);
         let old_back_idx = old_back_info & BACK_INDEX_MASK;
-        let old_output_idx = *old_buf.output.output_idx.read().unwrap();
+        let old_output_idx = old_buf.output.output_idx.get();
 
         // Check that updating from a clean state works
         assert!(!buf.output.update());
@@ -681,7 +682,7 @@ mod tests {
 
         // Check that updating from a dirty state works
         assert!(buf.output.update());
-        *expected_buf.output.output_idx.write().unwrap() = old_back_idx;
+        expected_buf.output.output_idx.set(old_back_idx);
         expected_buf
             .output
             .shared
@@ -936,13 +937,13 @@ mod tests {
 
         // Input-/output-/back-buffer indexes must be in range
         assert!(index_in_range(buf.input.input_idx));
-        assert!(index_in_range(*buf.output.output_idx.read().unwrap()));
+        assert!(index_in_range(buf.output.output_idx.get()));
         assert!(index_in_range(back_idx));
 
         // Input-/output-/back-buffer indexes must be distinct
-        assert!(buf.input.input_idx != *buf.output.output_idx.read().unwrap());
+        assert!(buf.input.input_idx != buf.output.output_idx.get());
         assert!(buf.input.input_idx != back_idx);
-        assert!(*buf.output.output_idx.read().unwrap() != back_idx);
+        assert!(buf.output.output_idx.get() != back_idx);
 
         // Back-buffer must have the expected dirty bit
         assert_eq!(back_buffer_dirty, expected_dirty_bit);
@@ -961,7 +962,7 @@ mod tests {
         // Check that the output_buffer query works in the initial state
         assert_eq!(
             as_ptr(&buf.output.output_buffer()),
-            buf.output.shared.buffers[*buf.output.output_idx.read().unwrap() as usize].get()
+            buf.output.shared.buffers[buf.output.output_idx.get() as usize].get()
         );
         assert_eq!(*buf, initial_buf);
 
