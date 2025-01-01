@@ -1,4 +1,4 @@
-# Triple buffering in Rust (fork that makes the output immutable but breaks it's lockfree nature, input is still lock and wait-free)
+# Triple buffering in Rust (fork that makes the output immutable ~~but breaks it's lockfree nature~~ using cell)
 
 [![MPLv2 licensed](https://img.shields.io/badge/license-MPLv2-blue.svg)](./LICENSE)
 [![On crates.io](https://img.shields.io/crates/v/triple_buffer.svg)](https://crates.io/crates/triple_buffer)
