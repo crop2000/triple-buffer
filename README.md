@@ -1,9 +1,15 @@
-# Triple buffering in Rust (fork that makes the output immutable ~~but breaks it's lockfree nature~~ using cell)
+# Triple buffering in Rust 
+
+This is a [triple_buffer](https://docs.rs/triple_buffer/latest/triple_buffer/) fork.
+
+The changes are:
+1) A guard for the input buffer access for publish on drop.
+2) The buffer index used inside the Output is wrapped into a `Cell` to make Output immutable.
 
 [![MPLv2 licensed](https://img.shields.io/badge/license-MPLv2-blue.svg)](./LICENSE)
-[![On crates.io](https://img.shields.io/crates/v/triple_buffer.svg)](https://crates.io/crates/triple_buffer)
+<!-- [![On crates.io](https://img.shields.io/crates/v/triple_buffer.svg)](https://crates.io/crates/triple_buffer)
 [![On docs.rs](https://docs.rs/triple_buffer/badge.svg)](https://docs.rs/triple_buffer/)
-[![Continuous Integration](https://img.shields.io/github/actions/workflow/status/HadrienG2/triple-buffer/ci.yml?branch=master)](https://github.com/HadrienG2/triple-buffer/actions?query=workflow%3A%22Continuous+Integration%22)
+[![Continuous Integration](https://img.shields.io/github/actions/workflow/status/HadrienG2/triple-buffer/ci.yml?branch=master)](https://github.com/HadrienG2/triple-buffer/actions?query=workflow%3A%22Continuous+Integration%22) -->
 ![Requires rustc
 1.74.0+](https://img.shields.io/badge/rustc-1.74.0+-lightgray.svg)
 

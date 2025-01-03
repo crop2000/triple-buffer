@@ -18,21 +18,10 @@ pub fn benchmark(c: &mut Criterion) {
                 *input.input_buffer() = black_box(0);
             })
         });
-        uncontended.bench_function("publish", |b| {
-            b.iter(|| {
-                input.publish();
-            })
-        });
-        uncontended.bench_function("send", |b| b.iter(|| input.write(black_box(0))));
-        uncontended.bench_function("publish + dirty update", |b| {
-            b.iter(|| {
-                input.publish();
-                output.update();
-            })
-        });
+        uncontended.bench_function("send", |b| b.iter(|| *input.input_buffer() = black_box(0)));
         uncontended.bench_function("transmit", |b| {
             b.iter(|| {
-                input.write(black_box(0));
+                *input.input_buffer() = black_box(0);
                 *output.read()
             })
         });
@@ -49,12 +38,8 @@ pub fn benchmark(c: &mut Criterion) {
                         *input.input_buffer() = black_box(0);
                     })
                 });
-                read_contended.bench_function("publish", |b| {
-                    b.iter(|| {
-                        input.publish();
-                    })
-                });
-                read_contended.bench_function("send", |b| b.iter(|| input.write(black_box(0))));
+                read_contended
+                    .bench_function("send", |b| b.iter(|| *input.input_buffer() = black_box(0)));
             },
         );
     }
@@ -63,7 +48,7 @@ pub fn benchmark(c: &mut Criterion) {
         let (mut input, output) = TripleBuffer::<u8>::default().split();
         let mut write_contended = c.benchmark_group("write contention");
         testbench::run_under_contention(
-            || input.write(black_box(0)),
+            || *input.input_buffer() = black_box(0),
             || {
                 write_contended
                     .bench_function("read output", |b| b.iter(|| *output.output_buffer()));
