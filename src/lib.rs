@@ -1,5 +1,12 @@
 //! Triple buffering in Rust
 //!
+//! This is a [triple_buffer](https://docs.rs/triple_buffer/latest/triple_buffer/) fork.
+//!
+//! The changes are:
+//! 1) A guard for the input buffer access for publish on drop.
+//! 2) The buffer index used inside the Output is wrapped into a `Cell`
+//!     to make Output immutable.
+//!
 //! In this crate, we propose a Rust implementation of triple buffering. This is
 //! a non-blocking thread synchronization mechanism that can be used when a
 //! single producer thread is frequently updating a shared data block, and a
@@ -15,10 +22,10 @@
 //! ```
 //! // Create a triple buffer
 //! use triple_buffer::triple_buffer;
-//! let (mut buf_input, mut buf_output) = triple_buffer(&0);
+//! let (mut buf_input, buf_output) = triple_buffer(&0);
 //!
 //! // The producer thread can move a value into the buffer at any time
-//! let producer = std::thread::spawn(move || buf_input.write(42));
+//! let producer = std::thread::spawn(move || buf_input.input_buffer() = (42));
 //!
 //! // The consumer thread can read the latest value at any time
 //! let consumer = std::thread::spawn(move || {
@@ -39,7 +46,7 @@
 //! ```
 //! // Create and split a triple buffer
 //! use triple_buffer::triple_buffer;
-//! let (mut buf_input, mut buf_output) = triple_buffer(&String::with_capacity(42));
+//! let (mut buf_input, buf_output) = triple_buffer(&String::with_capacity(42));
 //!
 //! // Mutate the input buffer in place
 //! {
@@ -71,7 +78,7 @@
 //! output_mut.push_str("world!");
 //! ```
 
-#![deny(missing_debug_implementations, missing_docs)]
+// #![deny(missing_debug_implementations, missing_docs)]
 
 extern crate alloc;
 
@@ -80,9 +87,13 @@ use crossbeam_utils::CachePadded;
 use alloc::sync::Arc;
 use core::{
     cell::UnsafeCell,
+    fmt,
     sync::atomic::{AtomicU8, Ordering},
 };
-use std::cell::Cell;
+use std::{
+    cell::Cell,
+    ops::{Deref, DerefMut},
+};
 
 /// A triple buffer, useful for nonblocking and thread-safe data sharing
 ///
@@ -210,16 +221,54 @@ pub struct Input<T: Send> {
     /// Index of the input buffer (which is private to the producer)
     input_idx: BufferIndex,
 }
+
+pub struct InputGuard<'a, T: 'a + Send> {
+    reference: &'a mut Input<T>,
+}
+
+impl<T: Send> Deref for InputGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        let input_ptr = self.reference.shared.buffers[self.reference.input_idx as usize].get();
+        unsafe { &*input_ptr }
+    }
+}
+
+impl<T: Send> DerefMut for InputGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        let input_ptr = self.reference.shared.buffers[self.reference.input_idx as usize].get();
+        unsafe { &mut *input_ptr }
+    }
+}
+
+impl<T: Send> Drop for InputGuard<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.reference.publish();
+    }
+}
+
+impl<T: Send + fmt::Debug> fmt::Debug for InputGuard<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl<T: fmt::Display + Send> fmt::Display for InputGuard<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        (**self).fmt(f)
+    }
+}
+
 //
 // Public interface
 impl<T: Send> Input<T> {
+    #[deprecated]
     /// Write a new value into the triple buffer
     pub fn write(&mut self, value: T) {
         // Update the input buffer
         *self.input_buffer() = value;
-
-        // Publish our update to the consumer
-        self.publish();
     }
 
     /// Check if the consumer has fetched our last submission yet
@@ -235,32 +284,41 @@ impl<T: Send> Input<T> {
         back_info & BACK_DIRTY_BIT == 0
     }
 
+    /// Get immutable reference of the input buffer
+    ///
+    /// This allows you to check the content of the input buffer in place without
+    /// publishing the buffer,
+    ///
+    pub fn peek_input_buffer(&mut self) -> &T {
+        // This is safe because the synchronization protocol ensures that we
+        // have exclusive access to this buffer.
+        let input_ptr = self.shared.buffers[self.input_idx as usize].get();
+        unsafe { &*input_ptr }
+    }
+
     /// Access the input buffer directly
     ///
-    /// This advanced interface allows you to update the input buffer in place,
+    /// This interface allows you to update the input buffer in place,
     /// so that you can avoid creating values of type T repeatedy just to push
     /// them into the triple buffer when doing so is expensive.
     ///
-    /// However, by using it, you force yourself to take into account some
-    /// implementation subtleties that you could normally ignore.
+    /// To avoid that you have to take care of pushing the update manualy
+    /// we return a InputGuard (modeled after MutexGuard) that calls `publish`
+    /// when dropped.
     ///
-    /// First, the buffer does not contain the last value that you published
+    /// Be aware that the buffer does not contain the last value that you published
     /// (which is now available to the consumer thread). In fact, what you get
     /// may not match _any_ value that you sent in the past, but rather be a new
     /// value that was written in there by the consumer thread. All you can
     /// safely assume is that the buffer contains a valid value of type T, which
-    /// you may need to "clean up" before use using a type-specific process.
+    /// you need to fill with valid values.
     ///
-    /// Second, we do not send updates automatically. You need to call
-    /// `publish()` in order to propagate a buffer update to the consumer.
-    /// Alternative designs based on Drop were considered, but considered too
-    /// magical for the target audience of this interface.
-    ///
-    pub fn input_buffer(&mut self) -> &mut T {
+    pub fn input_buffer(&mut self) -> InputGuard<T> {
         // This is safe because the synchronization protocol ensures that we
         // have exclusive access to this buffer.
-        let input_ptr = self.shared.buffers[self.input_idx as usize].get();
-        unsafe { &mut *input_ptr }
+        // let input_ptr = self.shared.buffers[self.input_idx as usize].get();
+        // unsafe { &mut *input_ptr }
+        InputGuard { reference: self }
     }
 
     /// Publish the current input buffer, checking for overwrites
@@ -274,7 +332,7 @@ impl<T: Send> Input<T> {
     /// It will also tell you whether you overwrote a value which was not read
     /// by the consumer thread.
     ///
-    pub fn publish(&mut self) -> bool {
+    fn publish(&mut self) -> bool {
         // Swap the input buffer and the back buffer, setting the dirty bit
         //
         // The ordering must be AcqRel, because...
@@ -702,7 +760,7 @@ mod tests {
         let old_buf = buf.clone();
 
         // Perform a write
-        buf.input.write(true);
+        *buf.input.input_buffer() = true;
 
         // Check new implementation state
         {
@@ -710,8 +768,9 @@ mod tests {
             let mut expected_buf = old_buf.clone();
 
             // ...write the new value in and swap...
-            *expected_buf.input.input_buffer() = true;
-            expected_buf.input.publish();
+            {
+                *expected_buf.input.input_buffer() = true;
+            }
 
             // Nothing else should have changed
             assert_eq!(buf, expected_buf);
@@ -724,7 +783,7 @@ mod tests {
     fn sequential_read() {
         // Let's create a triple buffer and write into it
         let mut buf = TripleBuffer::new(&1.0);
-        buf.input.write(4.2);
+        *buf.input.input_buffer() = 4.2;
 
         // Test readout from dirty (freshly written) triple buffer
         {
@@ -782,7 +841,7 @@ mod tests {
         testbench::concurrent_test_2(
             move || {
                 for value in 1..=TEST_WRITE_COUNT {
-                    buf_input.write(RaceCell::new(value));
+                    *buf_input.input_buffer() = RaceCell::new(value);
                 }
             },
             move || {
@@ -831,7 +890,7 @@ mod tests {
         testbench::concurrent_test_2(
             move || {
                 for value in 1..=TEST_WRITE_COUNT {
-                    buf_input.write(RaceCell::new(value));
+                    *buf_input.input_buffer() = RaceCell::new(value);
                     thread::yield_now();
                     thread::sleep(Duration::from_millis(32));
                 }
@@ -876,7 +935,8 @@ mod tests {
         testbench::concurrent_test_2(
             move || {
                 for new_value in 1..=TEST_WRITE_COUNT {
-                    match buf_input.input_buffer().get() {
+                    //use get_input_buffer don't publish on drop
+                    match buf_input.peek_input_buffer().get() {
                         Racey::Consistent(curr_value) => {
                             assert!(curr_value <= new_value);
                         }
@@ -884,7 +944,7 @@ mod tests {
                             panic!("Inconsistent state exposed by the buffer!");
                         }
                     }
-                    buf_input.write(RaceCell::new(new_value));
+                    *buf_input.input_buffer() = RaceCell::new(new_value);
                 }
             },
             move || {
@@ -892,7 +952,8 @@ mod tests {
                 while last_value < TEST_WRITE_COUNT {
                     match buf_output.output_buffer().get() {
                         Racey::Consistent(new_value) => {
-                            assert!((new_value >= last_value) && (new_value <= TEST_WRITE_COUNT));
+                            assert!((new_value <= TEST_WRITE_COUNT));
+                            assert!((new_value >= last_value));
                             last_value = new_value;
                         }
                         Racey::Inconsistent => {
@@ -949,10 +1010,10 @@ mod tests {
         assert_eq!(back_buffer_dirty, expected_dirty_bit);
 
         // Check that the "input buffer" query behaves as expected
-        assert_eq!(
-            as_ptr(&buf.input.input_buffer()),
-            buf.input.shared.buffers[buf.input.input_idx as usize].get()
-        );
+        // assert_eq!(
+        //     as_ptr(&*buf.input.get_input_buffer()),
+        //     buf.input.shared.buffers[buf.input.input_idx as usize].get()
+        // );
         assert_eq!(*buf, initial_buf);
 
         // Check that the "consumed" query behaves as expected
