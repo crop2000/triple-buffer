@@ -78,6 +78,7 @@
 //! output_mut.push_str("world!");
 //! ```
 
+#![cfg_attr(not(test), no_std)]
 // #![deny(missing_debug_implementations, missing_docs)]
 
 extern crate alloc;
@@ -86,13 +87,10 @@ use crossbeam_utils::CachePadded;
 
 use alloc::sync::Arc;
 use core::{
-    cell::UnsafeCell,
+    cell::{Cell, UnsafeCell},
     fmt,
-    sync::atomic::{AtomicU8, Ordering},
-};
-use std::{
-    cell::Cell,
     ops::{Deref, DerefMut},
+    sync::atomic::{AtomicU8, Ordering},
 };
 
 /// A triple buffer, useful for nonblocking and thread-safe data sharing
