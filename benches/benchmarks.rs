@@ -2,9 +2,8 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use triple_buffer::TripleBuffer;
 
 pub fn benchmark(c: &mut Criterion) {
-    let (mut input, mut output) = TripleBuffer::<u8>::default().split();
-
     {
+        let (mut input, mut output) = TripleBuffer::<u8>::default().split();
         let mut uncontended = c.benchmark_group("uncontended");
         uncontended.bench_function("read output", |b| b.iter(|| *output.output_buffer()));
         uncontended.bench_function("clean update", |b| {
@@ -39,9 +38,10 @@ pub fn benchmark(c: &mut Criterion) {
     }
 
     {
+        let (mut input, output) = TripleBuffer::<u8>::default().split();
         let mut read_contended = c.benchmark_group("read contention");
         testbench::run_under_contention(
-            || black_box(*output.read()),
+            move || black_box(*output.read()),
             || {
                 read_contended.bench_function("write input", |b| {
                     b.iter(|| {
@@ -59,12 +59,13 @@ pub fn benchmark(c: &mut Criterion) {
     }
 
     {
+        let (mut input, output) = TripleBuffer::<u8>::default().split();
         let mut write_contended = c.benchmark_group("write contention");
         testbench::run_under_contention(
             || input.write(black_box(0)),
             || {
                 write_contended
-                    .bench_function("read output", |b| b.iter(|| *output.output_buffer()));
+                    .bench_function("read output", |b| b.iter(|| *output.peek_output_buffer()));
                 write_contended.bench_function("update", |b| {
                     b.iter(|| {
                         output.update();
@@ -76,8 +77,9 @@ pub fn benchmark(c: &mut Criterion) {
     }
 
     {
+        let (mut input, output) = TripleBuffer::<u8>::default().split();
         let mut uncontended = c.benchmark_group("uncontended guarded");
-        uncontended.bench_function("read output", |b| b.iter(|| *output.output_buffer()));
+        uncontended.bench_function("read output", |b| b.iter(|| *output.peek_output_buffer()));
         uncontended.bench_function("clean update", |b| {
             b.iter(|| {
                 output.update();
@@ -101,7 +103,7 @@ pub fn benchmark(c: &mut Criterion) {
     }
 
     {
-        let (mut input, mut output) = TripleBuffer::<u8>::default().split();
+        let (mut input, output) = TripleBuffer::<u8>::default().split();
         let mut read_contended = c.benchmark_group("read contention guarded");
         testbench::run_under_contention(
             move || black_box(*output.read()),
@@ -120,9 +122,9 @@ pub fn benchmark(c: &mut Criterion) {
 
     {
         let (mut input, mut output) = TripleBuffer::<u8>::default().split();
-        let mut write_contended = c.benchmark_group("write contention guarded");
+        let mut write_contended = c.benchmark_group("write contention");
         testbench::run_under_contention(
-            || *input.guarded_input_buffer() = black_box(0),
+            || *input.input_buffer() = black_box(0),
             || {
                 write_contended
                     .bench_function("read output", |b| b.iter(|| *output.output_buffer()));
